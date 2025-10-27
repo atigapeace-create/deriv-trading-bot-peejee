@@ -4,12 +4,19 @@ import random
 import time
 import threading
 from datetime import datetime
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask, render_template_string, request, jsonify, redirect
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'real-deriv-bot-2024')
+app.secret_key = os.encret_key = os.environ.get('SECRET_KEY', 'real-deriv-bot-2024')
 
-print("🚀 REAL DERIV TRADING BOT - FIXED TOKEN VALIDATION")
+print("🚀 REAL DERIV TRADING BOT - FIXED WEBSOCKET")
+
+# Force HTTPS in production
+@app.before_request
+def force_https():
+    if os.environ.get('FLASK_ENV') == 'production':
+        if request.headers.get('X-Forwarded-Proto') == 'http':
+            return redirect(request.url.replace('http://', 'https://'), code=301)
 
 # Trading state
 trade_history = []
@@ -26,6 +33,7 @@ HTML_TEMPLATE = '''
 <html>
 <head>
     <title>Real Deriv Trading Bot</title>
+    <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
     <style>
         body { font-family: Arial; background: #1e1e1e; color: white; margin: 0; padding: 20px; }
         .container { max-width: 1000px; margin: 0 auto; }
@@ -40,6 +48,7 @@ HTML_TEMPLATE = '''
         .trade-log { background: #1a1a1a; padding: 10px; border-radius: 5px; height: 300px; overflow-y: auto; }
         .balance-display { font-size: 1.2em; font-weight: bold; color: #00ff88; }
         .hidden { display: none; }
+        .loading { color: #ffc107; }
     </style>
 </head>
 <body>
@@ -58,7 +67,7 @@ HTML_TEMPLATE = '''
             <h2>🔗 Deriv Connection</h2>
             <div id="connectionSection">
                 <input type="password" id="derivToken" placeholder="Enter your Deriv API Token" style="padding: 10px; width: 400px; margin: 5px;">
-                <button class="btn btn-warning" onclick="connectDeriv()">Connect to Real Deriv</button>
+                <button class="btn btn-warning" onclick="connectDeriv()" id="connectBtn">Connect to Real Deriv</button>
                 <div style="margin: 10px 0; color: #ffc107;">
                     <small>💡 Get your token from Deriv.com → Settings → API Token</small>
                 </div>
@@ -106,10 +115,16 @@ HTML_TEMPLATE = '''
 
         function connectDeriv() {
             const token = document.getElementById('derivToken').value.trim();
+            const connectBtn = document.getElementById('connectBtn');
+            
             if (!token) {
                 alert('Please enter your Deriv API token');
                 return;
             }
+
+            connectBtn.disabled = true;
+            connectBtn.innerHTML = '🔄 Connecting...';
+            document.getElementById('connectionStatus').innerHTML = '<span class="loading">🔄 Initializing connection...</span>';
 
             // Store token on server
             fetch('/store_token', {
@@ -123,26 +138,37 @@ HTML_TEMPLATE = '''
                     connectWebSocket(token);
                 } else {
                     document.getElementById('connectionStatus').innerHTML = '❌ ' + data.message;
+                    connectBtn.disabled = false;
+                    connectBtn.innerHTML = 'Connect to Real Deriv';
                 }
+            })
+            .catch(error => {
+                document.getElementById('connectionStatus').innerHTML = '❌ Network error: ' + error.message;
+                connectBtn.disabled = false;
+                connectBtn.innerHTML = 'Connect to Real Deriv';
             });
         }
 
         function connectWebSocket(token) {
             try {
-                document.getElementById('connectionStatus').innerHTML = '🔄 Connecting to Deriv...';
+                document.getElementById('connectionStatus').innerHTML = '<span class="loading">🔄 Connecting to Deriv WebSocket...</span>';
                 
-                derivWS = new WebSocket('wss://ws.deriv.com/websockets/v3');
+                // Use secure WebSocket
+                const wsUrl = 'wss://ws.deriv.com/websockets/v3';
+                console.log('Connecting to:', wsUrl);
+                
+                derivWS = new WebSocket(wsUrl);
                 
                 derivWS.onopen = function() {
                     console.log('✅ WebSocket Connected');
-                    document.getElementById('connectionStatus').innerHTML = '🔄 Authenticating...';
+                    document.getElementById('connectionStatus').innerHTML = '<span class="loading">🔄 Authenticating...</span>';
                     // Authorize with token
                     derivWS.send(JSON.stringify({ authorize: token }));
                 };
 
                 derivWS.onmessage = function(event) {
                     const data = JSON.parse(event.data);
-                    console.log('📨 WebSocket:', data);
+                    console.log('📨 WebSocket Response:', data);
                     
                     if (data.authorize) {
                         // Successfully connected
@@ -161,25 +187,40 @@ HTML_TEMPLATE = '''
                         updateServerConnection(true, realBalance);
                         
                     } else if (data.error) {
-                        document.getElementById('connectionStatus').innerHTML = '❌ ' + data.error.message;
+                        const errorMsg = data.error.message || 'Unknown error';
+                        document.getElementById('connectionStatus').innerHTML = '❌ ' + errorMsg;
                         if (data.error.code === 'InvalidToken') {
-                            document.getElementById('connectionStatus').innerHTML += '<br>💡 Please check your token and try again.';
+                            document.getElementById('connectionStatus').innerHTML += '<br>💡 Please check your token is valid and has trading permissions.';
                         }
+                        resetConnectButton();
                     }
                 };
 
                 derivWS.onerror = function(error) {
                     console.error('WebSocket error:', error);
-                    document.getElementById('connectionStatus').innerHTML = '❌ WebSocket connection failed. Please try again.';
+                    document.getElementById('connectionStatus').innerHTML = '❌ WebSocket connection failed. Please refresh the page and try again.';
+                    resetConnectButton();
                 };
 
-                derivWS.onclose = function() {
-                    console.log('WebSocket closed');
+                derivWS.onclose = function(event) {
+                    console.log('WebSocket closed:', event.code, event.reason);
+                    if (event.code !== 1000) {
+                        document.getElementById('connectionStatus').innerHTML = '❌ Connection closed: ' + (event.reason || 'Unknown reason');
+                        resetConnectButton();
+                    }
                 };
 
             } catch (error) {
+                console.error('Connection error:', error);
                 document.getElementById('connectionStatus').innerHTML = '❌ Connection error: ' + error.message;
+                resetConnectButton();
             }
+        }
+
+        function resetConnectButton() {
+            const connectBtn = document.getElementById('connectBtn');
+            connectBtn.disabled = false;
+            connectBtn.innerHTML = 'Connect to Real Deriv';
         }
 
         function updateServerConnection(connected, balance = 0) {
@@ -243,6 +284,10 @@ HTML_TEMPLATE = '''
                 document.getElementById('autoBtn').disabled = false;
             });
         }
+
+        // Debug info
+        console.log('Page loaded successfully');
+        console.log('WebSocket support:', 'WebSocket' in window);
     </script>
 </body>
 </html>
@@ -266,12 +311,9 @@ def store_token():
     if not deriv_token:
         return jsonify({'success': False, 'message': 'No token provided'})
     
-    # Accept any non-empty token - let WebSocket validate it
-    if len(deriv_token) < 5:
-        return jsonify({'success': False, 'message': 'Token too short'})
-    
+    # Accept any non-empty token
     user_data['deriv_token'] = deriv_token
-    return jsonify({'success': True, 'message': 'Token accepted - connecting...'})
+    return jsonify({'success': True, 'message': 'Token accepted'})
 
 @app.route('/update_connection', methods=['POST'])
 def update_connection():
@@ -297,7 +339,7 @@ def place_real_trade():
         return jsonify({'success': False, 'message': '❌ Insufficient balance!'})
     
     # Execute trade with realistic probabilities
-    win = random.random() < 0.68  # 68% win rate
+    win = random.random() < 0.68
     profit = amount * 0.82 if win else -amount
     
     user_data['balance'] += profit
@@ -322,7 +364,7 @@ def auto_trade_worker():
     while auto_trading_active and count < 20 and user_data['real_connected'] and user_data['balance'] > 5:
         symbols = ['R_100', 'R_50', '1HZ100V']
         symbol = random.choice(symbols)
-        amount = min(10, user_data['balance'] * 0.1)  # Max 10% of balance
+        amount = min(10, user_data['balance'] * 0.1)
         direction = "CALL" if random.random() > 0.5 else "PUT"
         
         win = random.random() < 0.68
@@ -366,5 +408,5 @@ def stop_auto_real():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print("🚀 REAL DERIV TRADING BOT STARTED")
-    print("📈 Fixed token validation - accepts any valid Deriv token")
+    print("📈 Fixed WebSocket connection issues")
     app.run(host='0.0.0.0', port=port, debug=False)
