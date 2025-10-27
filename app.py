@@ -9,7 +9,7 @@ from flask import Flask, render_template_string, request, jsonify
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'real-deriv-bot-2024')
 
-print("🚀 REAL DERIV TRADING BOT - WORKING VERSION")
+print("🚀 REAL DERIV TRADING BOT - FIXED TOKEN VALIDATION")
 
 # Trading state
 trade_history = []
@@ -59,6 +59,9 @@ HTML_TEMPLATE = '''
             <div id="connectionSection">
                 <input type="password" id="derivToken" placeholder="Enter your Deriv API Token" style="padding: 10px; width: 400px; margin: 5px;">
                 <button class="btn btn-warning" onclick="connectDeriv()">Connect to Real Deriv</button>
+                <div style="margin: 10px 0; color: #ffc107;">
+                    <small>💡 Get your token from Deriv.com → Settings → API Token</small>
+                </div>
                 <div id="connectionStatus" style="margin-top: 10px;"></div>
             </div>
             <div id="connectedSection" class="hidden">
@@ -102,7 +105,7 @@ HTML_TEMPLATE = '''
         let accountId = '';
 
         function connectDeriv() {
-            const token = document.getElementById('derivToken').value;
+            const token = document.getElementById('derivToken').value.trim();
             if (!token) {
                 alert('Please enter your Deriv API token');
                 return;
@@ -126,10 +129,13 @@ HTML_TEMPLATE = '''
 
         function connectWebSocket(token) {
             try {
+                document.getElementById('connectionStatus').innerHTML = '🔄 Connecting to Deriv...';
+                
                 derivWS = new WebSocket('wss://ws.deriv.com/websockets/v3');
                 
                 derivWS.onopen = function() {
                     console.log('✅ WebSocket Connected');
+                    document.getElementById('connectionStatus').innerHTML = '🔄 Authenticating...';
                     // Authorize with token
                     derivWS.send(JSON.stringify({ authorize: token }));
                 };
@@ -156,12 +162,15 @@ HTML_TEMPLATE = '''
                         
                     } else if (data.error) {
                         document.getElementById('connectionStatus').innerHTML = '❌ ' + data.error.message;
+                        if (data.error.code === 'InvalidToken') {
+                            document.getElementById('connectionStatus').innerHTML += '<br>💡 Please check your token and try again.';
+                        }
                     }
                 };
 
                 derivWS.onerror = function(error) {
                     console.error('WebSocket error:', error);
-                    document.getElementById('connectionStatus').innerHTML = '❌ WebSocket connection failed';
+                    document.getElementById('connectionStatus').innerHTML = '❌ WebSocket connection failed. Please try again.';
                 };
 
                 derivWS.onclose = function() {
@@ -253,16 +262,16 @@ def index():
 
 @app.route('/store_token', methods=['POST'])
 def store_token():
-    deriv_token = request.json.get('deriv_token')
+    deriv_token = request.json.get('deriv_token', '').strip()
     if not deriv_token:
         return jsonify({'success': False, 'message': 'No token provided'})
     
-    # Basic token validation
-    if len(deriv_token) < 20:
-        return jsonify({'success': False, 'message': 'Invalid token format'})
+    # Accept any non-empty token - let WebSocket validate it
+    if len(deriv_token) < 5:
+        return jsonify({'success': False, 'message': 'Token too short'})
     
     user_data['deriv_token'] = deriv_token
-    return jsonify({'success': True, 'message': 'Token stored'})
+    return jsonify({'success': True, 'message': 'Token accepted - connecting...'})
 
 @app.route('/update_connection', methods=['POST'])
 def update_connection():
@@ -357,5 +366,5 @@ def stop_auto_real():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print("🚀 REAL DERIV TRADING BOT STARTED")
-    print("📈 Client-side WebSocket connection enabled")
+    print("📈 Fixed token validation - accepts any valid Deriv token")
     app.run(host='0.0.0.0', port=port, debug=False)
