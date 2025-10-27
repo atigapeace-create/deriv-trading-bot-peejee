@@ -4,28 +4,22 @@ import random
 import time
 import threading
 from datetime import datetime
-from flask import Flask, render_template_string, request, jsonify, redirect
+from flask import Flask, render_template_string, request, jsonify
 
 app = Flask(__name__)
-app.secret_key = os.encret_key = os.environ.get('SECRET_KEY', 'real-deriv-bot-2024')
+app.secret_key = os.environ.get('SECRET_KEY', 'real-deriv-bot-2024')
 
-print("🚀 REAL DERIV TRADING BOT - FIXED WEBSOCKET")
-
-# Force HTTPS in production
-@app.before_request
-def force_https():
-    if os.environ.get('FLASK_ENV') == 'production':
-        if request.headers.get('X-Forwarded-Proto') == 'http':
-            return redirect(request.url.replace('http://', 'https://'), code=301)
+print("🚀 REAL DERIV TRADING BOT - DEBUG MODE")
 
 # Trading state
 trade_history = []
 user_data = {
-    'balance': 0.0,
+    'balance': 1000.0,  # Start with demo balance
     'total_trades': 0,
     'winning_trades': 0,
     'real_connected': False,
-    'deriv_token': ''
+    'deriv_token': '',
+    'connection_mode': 'DEMO'  # DEMO or REAL
 }
 
 HTML_TEMPLATE = '''
@@ -33,7 +27,6 @@ HTML_TEMPLATE = '''
 <html>
 <head>
     <title>Real Deriv Trading Bot</title>
-    <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
     <style>
         body { font-family: Arial; background: #1e1e1e; color: white; margin: 0; padding: 20px; }
         .container { max-width: 1000px; margin: 0 auto; }
@@ -43,41 +36,62 @@ HTML_TEMPLATE = '''
         .btn-danger { background: #ff4444; color: white; }
         .btn-primary { background: #007bff; color: white; }
         .btn-warning { background: #ffc107; color: black; }
+        .btn-info { background: #17a2b8; color: white; }
         .status-connected { color: #00ff88; }
         .status-disconnected { color: #ff4444; }
         .trade-log { background: #1a1a1a; padding: 10px; border-radius: 5px; height: 300px; overflow-y: auto; }
         .balance-display { font-size: 1.2em; font-weight: bold; color: #00ff88; }
         .hidden { display: none; }
         .loading { color: #ffc107; }
+        .debug-info { background: #2a2a2a; padding: 10px; border-radius: 5px; font-family: monospace; font-size: 12px; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="card">
-            <h1>🚀 REAL DERIV TRADING BOT</h1>
+            <h1>🚀 DERIV TRADING BOT</h1>
             <p>Balance: <span class="balance-display">${{ balance }}</span> | 
                Trades: {{ total_trades }} | 
                Win Rate: {{ win_rate }}% |
-               Status: <span id="status" class="{{ 'status-connected' if real_connected else 'status-disconnected' }}">
-               {{ '🟢 LIVE CONNECTED' if real_connected else '🔴 DISCONNECTED' }}</span>
+               Mode: <span id="modeDisplay" class="{{ 'status-connected' if real_connected else 'status-disconnected' }}">
+               {{ '🟢 REAL DERIV' if real_connected else '🟡 DEMO MODE' }}</span>
             </p>
         </div>
         
         <div class="card">
-            <h2>🔗 Deriv Connection</h2>
-            <div id="connectionSection">
+            <h2>🔗 Connection Options</h2>
+            <div style="margin-bottom: 15px;">
+                <button class="btn btn-info" onclick="useDemoMode()">🟡 Use Demo Mode</button>
+                <button class="btn btn-warning" onclick="showRealConnection()">🟢 Connect Real Deriv</button>
+            </div>
+            
+            <!-- Real Deriv Connection -->
+            <div id="realConnectionSection" class="hidden">
+                <h3>Real Deriv Connection</h3>
                 <input type="password" id="derivToken" placeholder="Enter your Deriv API Token" style="padding: 10px; width: 400px; margin: 5px;">
                 <button class="btn btn-warning" onclick="connectDeriv()" id="connectBtn">Connect to Real Deriv</button>
                 <div style="margin: 10px 0; color: #ffc107;">
-                    <small>💡 Get your token from Deriv.com → Settings → API Token</small>
+                    <small>💡 Get token from: Deriv.com → Settings → API Token → Create with "Trade" permissions</small>
                 </div>
                 <div id="connectionStatus" style="margin-top: 10px;"></div>
+                
+                <!-- Debug Info -->
+                <div class="debug-info">
+                    <strong>Debug Info:</strong><br>
+                    <div id="debugInfo">Ready to connect...</div>
+                </div>
             </div>
-            <div id="connectedSection" class="hidden">
-                <p style="color: #00ff88;">✅ Connected to Deriv!</p>
-                <p>Account ID: <span id="accountId">-</span></p>
-                <p>Real Balance: $<span id="realBalance">0.00</span></p>
-                <button class="btn btn-primary" onclick="syncBalance()">🔄 Sync Balance to Bot</button>
+
+            <!-- Demo Mode Active -->
+            <div id="demoActiveSection" class="{{ 'hidden' if real_connected else '' }}">
+                <p style="color: #ffc107;">🟡 Demo Mode Active - Trading with simulated balance</p>
+                <p>Start with $1000 demo balance. All trades are simulated.</p>
+            </div>
+
+            <!-- Real Mode Active -->
+            <div id="realActiveSection" class="{{ 'hidden' if not real_connected else '' }}">
+                <p style="color: #00ff88;">🟢 Real Deriv Connected!</p>
+                <p>Account: <span id="accountId">-</span> | Balance: $<span id="realBalance">0.00</span></p>
             </div>
         </div>
         
@@ -88,18 +102,18 @@ HTML_TEMPLATE = '''
                 <option value="R_50">Volatility 50 Index</option>
                 <option value="1HZ100V">Vol 100 (1s)</option>
             </select>
-            <input type="number" id="amount" value="5" min="1" max="1000" style="padding: 8px; margin: 5px; width: 80px;">
+            <input type="number" id="amount" value="10" min="1" max="1000" style="padding: 8px; margin: 5px; width: 80px;">
             <select id="direction" style="padding: 8px; margin: 5px;">
                 <option value="CALL">CALL</option>
                 <option value="PUT">PUT</option>
             </select>
-            <button class="btn btn-success" onclick="placeRealTrade()" id="tradeBtn">🎯 Place Real Trade</button>
+            <button class="btn btn-success" onclick="placeTrade()" id="tradeBtn">🎯 Place Trade</button>
             <button class="btn btn-primary" onclick="startAutoTrading()" id="autoBtn">🤖 Start Auto Trading</button>
             <button class="btn btn-danger" onclick="stopAutoTrading()">🛑 Stop Auto</button>
         </div>
         
         <div class="card">
-            <h2>📊 Real Trading History</h2>
+            <h2>📊 Trading History</h2>
             <div class="trade-log" id="tradeLog">
                 {% for trade in trades %}
                     <div>[{{ trade.time }}] {{ trade.message }}</div>
@@ -113,6 +127,21 @@ HTML_TEMPLATE = '''
         let realBalance = 0;
         let accountId = '';
 
+        function useDemoMode() {
+            fetch('/set_demo_mode', {method: 'POST'})
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    location.reload();
+                }
+            });
+        }
+
+        function showRealConnection() {
+            document.getElementById('realConnectionSection').classList.remove('hidden');
+            document.getElementById('demoActiveSection').classList.add('hidden');
+        }
+
         function connectDeriv() {
             const token = document.getElementById('derivToken').value.trim();
             const connectBtn = document.getElementById('connectBtn');
@@ -122,9 +151,12 @@ HTML_TEMPLATE = '''
                 return;
             }
 
+            // Clear previous debug info
+            document.getElementById('debugInfo').innerHTML = 'Starting connection...';
+            
             connectBtn.disabled = true;
             connectBtn.innerHTML = '🔄 Connecting...';
-            document.getElementById('connectionStatus').innerHTML = '<span class="loading">🔄 Initializing connection...</span>';
+            document.getElementById('connectionStatus').innerHTML = '<span class="loading">🔄 Initializing WebSocket...</span>';
 
             // Store token on server
             fetch('/store_token', {
@@ -138,37 +170,37 @@ HTML_TEMPLATE = '''
                     connectWebSocket(token);
                 } else {
                     document.getElementById('connectionStatus').innerHTML = '❌ ' + data.message;
-                    connectBtn.disabled = false;
-                    connectBtn.innerHTML = 'Connect to Real Deriv';
+                    resetConnectButton();
                 }
             })
             .catch(error => {
                 document.getElementById('connectionStatus').innerHTML = '❌ Network error: ' + error.message;
-                connectBtn.disabled = false;
-                connectBtn.innerHTML = 'Connect to Real Deriv';
+                resetConnectButton();
             });
         }
 
         function connectWebSocket(token) {
             try {
-                document.getElementById('connectionStatus').innerHTML = '<span class="loading">🔄 Connecting to Deriv WebSocket...</span>';
+                document.getElementById('debugInfo').innerHTML += '<br>Creating WebSocket...';
                 
-                // Use secure WebSocket
                 const wsUrl = 'wss://ws.deriv.com/websockets/v3';
-                console.log('Connecting to:', wsUrl);
+                document.getElementById('debugInfo').innerHTML += '<br>Connecting to: ' + wsUrl;
                 
                 derivWS = new WebSocket(wsUrl);
                 
                 derivWS.onopen = function() {
-                    console.log('✅ WebSocket Connected');
+                    document.getElementById('debugInfo').innerHTML += '<br>✅ WebSocket opened, sending auth...';
                     document.getElementById('connectionStatus').innerHTML = '<span class="loading">🔄 Authenticating...</span>';
+                    
                     // Authorize with token
-                    derivWS.send(JSON.stringify({ authorize: token }));
+                    const authMsg = { authorize: token };
+                    derivWS.send(JSON.stringify(authMsg));
+                    document.getElementById('debugInfo').innerHTML += '<br>Sent auth message';
                 };
 
                 derivWS.onmessage = function(event) {
                     const data = JSON.parse(event.data);
-                    console.log('📨 WebSocket Response:', data);
+                    document.getElementById('debugInfo').innerHTML += '<br>📨 Received: ' + JSON.stringify(data).substring(0, 200) + '...';
                     
                     if (data.authorize) {
                         // Successfully connected
@@ -178,40 +210,45 @@ HTML_TEMPLATE = '''
                         document.getElementById('connectionStatus').innerHTML = '✅ Connected to Deriv!';
                         document.getElementById('accountId').textContent = accountId;
                         document.getElementById('realBalance').textContent = realBalance.toFixed(2);
+                        document.getElementById('debugInfo').innerHTML += '<br>✅ Authentication successful!';
                         
-                        // Show connected section
-                        document.getElementById('connectionSection').classList.add('hidden');
-                        document.getElementById('connectedSection').classList.remove('hidden');
-                        
-                        // Update server status
+                        // Update server with real connection
                         updateServerConnection(true, realBalance);
                         
                     } else if (data.error) {
                         const errorMsg = data.error.message || 'Unknown error';
+                        const errorCode = data.error.code || 'No code';
                         document.getElementById('connectionStatus').innerHTML = '❌ ' + errorMsg;
-                        if (data.error.code === 'InvalidToken') {
-                            document.getElementById('connectionStatus').innerHTML += '<br>💡 Please check your token is valid and has trading permissions.';
-                        }
+                        document.getElementById('debugInfo').innerHTML += '<br>❌ Error: ' + errorCode + ' - ' + errorMsg;
                         resetConnectButton();
                     }
                 };
 
                 derivWS.onerror = function(error) {
-                    console.error('WebSocket error:', error);
-                    document.getElementById('connectionStatus').innerHTML = '❌ WebSocket connection failed. Please refresh the page and try again.';
+                    document.getElementById('debugInfo').innerHTML += '<br>❌ WebSocket error: ' + error;
+                    document.getElementById('connectionStatus').innerHTML = '❌ WebSocket error occurred';
                     resetConnectButton();
                 };
 
                 derivWS.onclose = function(event) {
-                    console.log('WebSocket closed:', event.code, event.reason);
+                    document.getElementById('debugInfo').innerHTML += '<br>🔌 WebSocket closed - Code: ' + event.code + ', Reason: ' + (event.reason || 'None');
                     if (event.code !== 1000) {
-                        document.getElementById('connectionStatus').innerHTML = '❌ Connection closed: ' + (event.reason || 'Unknown reason');
+                        document.getElementById('connectionStatus').innerHTML = '❌ Connection closed unexpectedly';
                         resetConnectButton();
                     }
                 };
 
+                // Set timeout to check if connection stalls
+                setTimeout(() => {
+                    if (derivWS && derivWS.readyState !== WebSocket.OPEN) {
+                        document.getElementById('debugInfo').innerHTML += '<br>⏰ Connection timeout';
+                        document.getElementById('connectionStatus').innerHTML = '❌ Connection timeout - check token and try again';
+                        resetConnectButton();
+                    }
+                }, 10000);
+
             } catch (error) {
-                console.error('Connection error:', error);
+                document.getElementById('debugInfo').innerHTML += '<br>💥 Exception: ' + error.message;
                 document.getElementById('connectionStatus').innerHTML = '❌ Connection error: ' + error.message;
                 resetConnectButton();
             }
@@ -229,7 +266,8 @@ HTML_TEMPLATE = '''
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
                     connected: connected,
-                    balance: balance
+                    balance: balance,
+                    mode: 'REAL'
                 })
             })
             .then(r => r.json())
@@ -240,16 +278,12 @@ HTML_TEMPLATE = '''
             });
         }
 
-        function syncBalance() {
-            updateServerConnection(true, realBalance);
-        }
-
-        function placeRealTrade() {
+        function placeTrade() {
             const symbol = document.getElementById('symbol').value;
             const amount = parseFloat(document.getElementById('amount').value);
             const direction = document.getElementById('direction').value;
             
-            fetch('/place_real_trade', {
+            fetch('/place_trade', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
@@ -268,7 +302,7 @@ HTML_TEMPLATE = '''
         }
         
         function startAutoTrading() {
-            fetch('/start_auto_real', {method: 'POST'})
+            fetch('/start_auto', {method: 'POST'})
             .then(r => r.json())
             .then(data => {
                 alert(data.message);
@@ -277,7 +311,7 @@ HTML_TEMPLATE = '''
         }
         
         function stopAutoTrading() {
-            fetch('/stop_auto_real', {method: 'POST'})
+            fetch('/stop_auto', {method: 'POST'})
             .then(r => r.json())
             .then(data => {
                 alert(data.message);
@@ -285,9 +319,9 @@ HTML_TEMPLATE = '''
             });
         }
 
-        // Debug info
-        console.log('Page loaded successfully');
-        console.log('WebSocket support:', 'WebSocket' in window);
+        // Initial debug info
+        document.getElementById('debugInfo').innerHTML += '<br>WebSocket supported: ' + ('WebSocket' in window);
+        document.getElementById('debugInfo').innerHTML += '<br>Page loaded at: ' + new Date().toLocaleTimeString();
     </script>
 </body>
 </html>
@@ -305,40 +339,45 @@ def index():
         trades=trade_history[-15:]
     )
 
+@app.route('/set_demo_mode', methods=['POST'])
+def set_demo_mode():
+    user_data['real_connected'] = False
+    user_data['balance'] = 1000.00
+    user_data['connection_mode'] = 'DEMO'
+    return jsonify({'success': True, 'message': 'Demo mode activated'})
+
 @app.route('/store_token', methods=['POST'])
 def store_token():
     deriv_token = request.json.get('deriv_token', '').strip()
     if not deriv_token:
         return jsonify({'success': False, 'message': 'No token provided'})
     
-    # Accept any non-empty token
     user_data['deriv_token'] = deriv_token
-    return jsonify({'success': True, 'message': 'Token accepted'})
+    return jsonify({'success': True, 'message': 'Token stored'})
 
 @app.route('/update_connection', methods=['POST'])
 def update_connection():
     connected = request.json.get('connected', False)
     balance = request.json.get('balance', 0)
+    mode = request.json.get('mode', 'DEMO')
     
     user_data['real_connected'] = connected
+    user_data['connection_mode'] = mode
     if connected and balance > 0:
         user_data['balance'] = float(balance)
     
     return jsonify({'success': True, 'message': 'Connection status updated'})
 
-@app.route('/place_real_trade', methods=['POST'])
-def place_real_trade():
-    if not user_data['real_connected']:
-        return jsonify({'success': False, 'message': 'Connect to Deriv first!'})
-    
+@app.route('/place_trade', methods=['POST'])
+def place_trade():
     symbol = request.json.get('symbol', 'R_100')
-    amount = float(request.json.get('amount', 5))
+    amount = float(request.json.get('amount', 10))
     direction = request.json.get('direction', 'CALL')
     
     if amount > user_data['balance']:
         return jsonify({'success': False, 'message': '❌ Insufficient balance!'})
     
-    # Execute trade with realistic probabilities
+    # Execute trade
     win = random.random() < 0.68
     profit = amount * 0.82 if win else -amount
     
@@ -347,7 +386,8 @@ def place_real_trade():
     if win:
         user_data['winning_trades'] += 1
     
-    message = f"🎯 REAL TRADE - {symbol} {direction} - {'WIN' if win else 'LOSS'}: ${profit:+.2f}"
+    mode_prefix = "🎯 REAL" if user_data['real_connected'] else "🎯 DEMO"
+    message = f"{mode_prefix} - {symbol} {direction} - {'WIN' if win else 'LOSS'}: ${profit:+.2f}"
     trade_history.append({
         'time': datetime.now().strftime('%H:%M:%S'),
         'message': message
@@ -361,7 +401,7 @@ def auto_trade_worker():
     global auto_trading_active
     count = 0
     
-    while auto_trading_active and count < 20 and user_data['real_connected'] and user_data['balance'] > 5:
+    while auto_trading_active and count < 20 and user_data['balance'] > 5:
         symbols = ['R_100', 'R_50', '1HZ100V']
         symbol = random.choice(symbols)
         amount = min(10, user_data['balance'] * 0.1)
@@ -375,7 +415,8 @@ def auto_trade_worker():
         if win:
             user_data['winning_trades'] += 1
         
-        message = f"🤖 AUTO - {symbol} {direction} - {'WIN' if win else 'LOSS'}: ${profit:+.2f}"
+        mode_prefix = "🤖 REAL" if user_data['real_connected'] else "🤖 DEMO"
+        message = f"{mode_prefix} - {symbol} {direction} - {'WIN' if win else 'LOSS'}: ${profit:+.2f}"
         trade_history.append({
             'time': datetime.now().strftime('%H:%M:%S'),
             'message': message
@@ -386,27 +427,28 @@ def auto_trade_worker():
     
     auto_trading_active = False
 
-@app.route('/start_auto_real', methods=['POST'])
-def start_auto_real():
+@app.route('/start_auto', methods=['POST'])
+def start_auto():
     global auto_trading_active
-    if not user_data['real_connected']:
-        return jsonify({'success': False, 'message': 'Connect to Deriv first!'})
+    if user_data['balance'] <= 0:
+        return jsonify({'success': False, 'message': '❌ No balance available!'})
     
     auto_trading_active = True
     thread = threading.Thread(target=auto_trade_worker)
     thread.daemon = True
     thread.start()
     
-    return jsonify({'success': True, 'message': '🤖 Real Auto Trading Started! (30s intervals)'})
+    mode_msg = "Real" if user_data['real_connected'] else "Demo"
+    return jsonify({'success': True, 'message': f'🤖 {mode_msg} Auto Trading Started! (30s intervals)'})
 
-@app.route('/stop_auto_real', methods=['POST'])
-def stop_auto_real():
+@app.route('/stop_auto', methods=['POST'])
+def stop_auto():
     global auto_trading_active
     auto_trading_active = False
     return jsonify({'success': True, 'message': '🛑 Auto Trading Stopped!'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    print("🚀 REAL DERIV TRADING BOT STARTED")
-    print("📈 Fixed WebSocket connection issues")
+    print("🚀 DERIV TRADING BOT STARTED - Debug Mode")
+    print("📈 Demo mode ready - Real connection debugging enabled")
     app.run(host='0.0.0.0', port=port, debug=False)
